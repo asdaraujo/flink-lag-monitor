@@ -1,0 +1,99 @@
+= Flink Lag Monitor
+
+This job monitors the latency for Kafka messages that are being replicated between two topics, regardless of where the topics are located and/or which application is being used to replicate the messages.
+
+The latency is calculated based on the messages' timestamps in Kafka and relies on the existence of a message identification property that can be used to correlate messages on the source and target topics (JSON and Avro message formats are supported).
+
+If the messages are replicated across different Kafka clusters, it's assumed that the clocks of those clusters are in sync. Similarly, it's assumed that the clocks of multiple brokers in a Single Kafka cluster are in sync. Clock variations between servers/cluster may lead to incorrect lag times.
+
+== Usage
+
+Given then messages are being replicated from a source topic to a target topic by an external application, this job will monitor both topics and correlate messages on them by the provided primary keys. The lag for each message is then calculated as the difference of the Kafka message timestamps on the target and source topics.
+
+The job can produce 2 optional outputs (to output Kafka topics):
+
+* A stream containing the lag for every single message
+* A stream containing lag statistics aggregated over the specified time interval
+
+It can also optionally print those two output streams to the job log. Be careful with the amount of log generated for large volume streams.
+
+=== Source arguments:
+
+* *(Required) `--source.bootstrap.servers <broker1:9092,...>`*
+** List of bootstrap servers for the Kafka cluster where the source topic is located
+
+* *(Required) `--source.topic <topic>`*
+** Name of the source topic
+
+* *(Required) `--source.primary.key <key_field>`*
+** Name of primary key field of the source message
+
+* `--source.use.json`
+** Specify this argument if the source message is in JSON format. This option is mutually exclusive with `--source.avro.schema.file`
+
+* `--source.avro.schema.file <avsc_file>`
+** Specify this argument if the source message is in AVRO format. An Avro schema definition file must be specified. This option is mutually exclusive with `--source.use.json`
+
+* `--source.<kafka_client_property> <value>`
+** These arguments can be used to specify any additional options for the connection with the Kafka source cluster
+
+=== Target arguments:
+
+* *(Required) `--target.bootstrap.servers <broker1:9092,...>`*
+** List of bootstrap servers for the Kafka cluster where the target topic is located
+
+* *(Required) `--target.topic <topic>`*
+** Name of the target topic
+
+* *(Required) `--target.primary.key <key_field>`*
+** Name of primary key field of the target message
+
+* `--target.use.json`
+** Specify this argument if the target message is in JSON format. This option is mutually exclusive with `--target.avro.schema.file`
+
+* `--target.avro.schema.file <avsc_file>`
+** Specify this argument if the target message is in AVRO format. An Avro schema definition file must be specified. This option is mutually exclusive with `--target.use.json`
+
+* `--target.<kafka_client_property> <value>`
+** These arguments can be used to specify any additional options for the connection with the Kafka target cluster
+
+=== Lag output arguments:
+
+The job will only produce the lag output if the parameters below are specified:
+
+* `--lag.output.bootstrap.servers <broker1:9092,...>`
+** List of bootstrap servers for the Kafka cluster where the lag output topic is located
+
+* `--lag.output.topic <topic>`
+** Name of the lag output topic
+
+* `--lag.output.<kafka_client_property> <value>`
+** These arguments can be used to specify any additional options for the connection with the Kafka cluster where the lag output topic is located
+
+=== Stats output arguments:
+
+The job will only produce the stats output if the parameters below are specified:
+
+* `--stats.output.bootstrap.servers <broker1:9092,...>`
+** List of bootstrap servers for the Kafka cluster where the stats output topic is located
+
+* `--stats.output.topic <topic>`
+** Name of the stats output topic
+
+* `--stats.output.<kafka_client_property> <value>`
+** These arguments can be used to specify any additional options for the connection with the Kafka cluster where the stats output topic is located
+
+=== Other optional parameters:
+
+* `--print.lag`
+** If specified, the lag for each individual message is printed to the job's log
+* `--print.stats`
+** If specified, the aggregate lag stats are printed to the job's log
+* `--aggr.window.ms <int>`
+** Length of the window over which the stats are aggregated. Default: 60,000 ms
+* `--aggr.watermark.ms <int>`
+** Watermark duration for the window aggregations. The job will wait this specified amount of time for messages that may be out of order. over which the stats are aggregated. Default: 30,000 ms
+* `--join.interval.ms <int>`
+** Messages from the two topics are only considered to be correlated if they appear in the two topics within the specified amount of time. Default: 10,000 ms
+* `--parallelism <int, default: 1>`
+** Default parallelism for the job. Default: 1
