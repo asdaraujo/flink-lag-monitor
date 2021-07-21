@@ -17,20 +17,26 @@ package com.cloudera.examples;
 
 import com.cloudera.examples.data.MessageLag;
 import com.cloudera.examples.data.Message;
+import com.cloudera.examples.data.MessageLagStats;
+import com.cloudera.examples.operators.StatsAggregate;
 import com.cloudera.examples.operators.TimestampAndKeyDeserializationSchema;
 import com.cloudera.examples.utils.Utils;
-//import org.apache.flink.api.common.eventtime.WatermarkStrategy;
 import org.apache.flink.api.java.utils.ParameterTool;
+import org.apache.flink.streaming.api.TimeCharacteristic;
 import org.apache.flink.streaming.api.datastream.DataStream;
 import org.apache.flink.streaming.api.datastream.KeyedStream;
 import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
+import org.apache.flink.streaming.api.functions.AssignerWithPunctuatedWatermarks;
 import org.apache.flink.streaming.api.functions.co.ProcessJoinFunction;
+import org.apache.flink.streaming.api.functions.windowing.AllWindowFunction;
+import org.apache.flink.streaming.api.watermark.Watermark;
+import org.apache.flink.streaming.api.windowing.assigners.TumblingEventTimeWindows;
 import org.apache.flink.streaming.api.windowing.time.Time;
+import org.apache.flink.streaming.api.windowing.windows.TimeWindow;
 import org.apache.flink.streaming.connectors.kafka.FlinkKafkaConsumer;
 import org.apache.flink.streaming.connectors.kafka.FlinkKafkaProducer;
 import org.apache.flink.streaming.connectors.kafka.KafkaDeserializationSchema;
 import org.apache.flink.streaming.connectors.kafka.KafkaSerializationSchema;
-//import org.apache.flink.table.api.bridge.java.StreamTableEnvironment;
 import org.apache.flink.util.Collector;
 import org.apache.kafka.clients.producer.ProducerRecord;
 
@@ -40,9 +46,8 @@ import java.nio.file.Files;
 import java.nio.file.Paths;
 import java.util.Arrays;
 import java.util.List;
+import java.util.Map;
 import java.util.Properties;
-
-//import static org.apache.flink.table.api.Expressions.*;
 
 public class FlinkLagMonitor {
     static final String SOURCE_PREFIX = "source.";
@@ -84,7 +89,6 @@ public class FlinkLagMonitor {
     static private String targetTopic = null;
     static private boolean targetIsJson = false;
     static private Integer targetCsvField = null;
-    static private boolean targetIsOffset = false;
     static private String targetSchema = null;
     static private String targetKey = null;
     static private Properties targetProps = null;
@@ -113,6 +117,7 @@ public class FlinkLagMonitor {
 
         StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
         env.setParallelism(parallelism);
+        env.setStreamTimeCharacteristic(TimeCharacteristic.EventTime);
 //        StreamTableEnvironment tableEnv = StreamTableEnvironment.create(env);
 
         KafkaDeserializationSchema<Message> sourceSerDe = new TimestampAndKeyDeserializationSchema(sourceKey, sourceIsJson ? null : sourceSchema, sourceCsvField, sourceIsOffset);
@@ -120,7 +125,7 @@ public class FlinkLagMonitor {
         FlinkKafkaConsumer<Message> sourceConsumer = new FlinkKafkaConsumer<>(sourceTopic, sourceSerDe, sourceProps);
         KeyedStream<Message, Integer> source = env.addSource(sourceConsumer).keyBy(t -> t.hash);
 
-        KafkaDeserializationSchema<Message> targetSerDe = new TimestampAndKeyDeserializationSchema(targetKey, targetIsJson ? null : targetSchema, targetCsvField, targetIsOffset);
+        KafkaDeserializationSchema<Message> targetSerDe = new TimestampAndKeyDeserializationSchema(targetKey, targetIsJson ? null : targetSchema, targetCsvField, false);
         FlinkKafkaConsumer<Message> targetConsumer = new FlinkKafkaConsumer<>(targetTopic, targetSerDe, targetProps);
         KeyedStream<Message, Integer> target = env.addSource(targetConsumer).keyBy(t -> t.hash);
 
@@ -133,9 +138,6 @@ public class FlinkLagMonitor {
                         out.collect(new MessageLag(left.hash, left.timestamp, right.timestamp));
                     }
                 });
-//                .assignTimestampsAndWatermarks(WatermarkStrategy
-//                        .<MessageLag>forBoundedOutOfOrderness(Duration.ofMillis(aggrWatermarkMs))
-//                        .withTimestampAssigner((event, timestamp) -> event.timestamp0));
 
         if (lagTopic != null || printLag) {
             DataStream<String> jsonStream = lagStream.map(MessageLag::toJson);
@@ -147,38 +149,41 @@ public class FlinkLagMonitor {
                 jsonStream.print();
         }
 
-//        if (statsTopic != null || printStats) {
-//            Table results = tableEnv
-//                    .fromDataStream(lagStream,
-//                            $("timestamp0").rowtime().as("rowtime"),
-//                            $("timestamp0"),
-//                            $("timestamp1"))
-//                    .addColumns($("timestamp1").minus($("timestamp0")).as("lagMs"))
-//                    .window(Tumble
-//                            .over(lit(aggrWindowMs).milli())
-//                            .on($("rowtime"))
-//                            .as("w"))
-//                    .groupBy($("w"))
-//                    .select(
-//                            $("w").start().cast(DataTypes.BIGINT()).as("windowStart"),
-//                            $("w").end().cast(DataTypes.BIGINT()).as("windowEnd"),
-//                            $("lagMs").min().as("minLagMs"),
-//                            $("lagMs").max().as("maxLagMs"),
-//                            $("lagMs").avg().as("avgLagMs"),
-//                            $("lagMs").stddevPop().as("sdevLagMs"),
-//                            $("lagMs").count().as("count")
-//                    );
-//
-//            DataStream<String> statsJsonStream = tableEnv
-//                    .toAppendStream(results, MessageLagStats.class)
-//                    .map(MessageLagStats::toJson);
-//
-//            if (statsTopic != null)
-//                statsJsonStream.addSink(getProducer(statsTopic, statsProps));
-//
-//            if (printStats)
-//                statsJsonStream.print();
-//        }
+        if (statsTopic != null || printStats) {
+            DataStream<MessageLagStats> statsStream = lagStream
+                    .assignTimestampsAndWatermarks(new AssignerWithPunctuatedWatermarks<MessageLag>() {
+                        @Nullable
+                        @Override
+                        public Watermark checkAndGetNextWatermark(MessageLag messageLag, long extractedTs) {
+                            return new Watermark(extractedTs);
+                        }
+
+                        @Override
+                        public long extractTimestamp(MessageLag messageLag, long previousTs) {
+                            return messageLag.timestamp0;
+                        }
+                    })
+                    .windowAll(TumblingEventTimeWindows.of(Time.milliseconds(aggrWindowMs)))
+                    .aggregate(new StatsAggregate(), new AllWindowFunction<MessageLagStats, MessageLagStats, TimeWindow>() {
+                        @Override
+                        public void apply(TimeWindow timeWindow, Iterable<MessageLagStats> iterable, Collector<MessageLagStats> out) throws Exception {
+                            for(MessageLagStats stats : iterable) {
+                                stats.windowStart = timeWindow.getStart();
+                                stats.windowEnd = timeWindow.getEnd();
+                                out.collect(stats);
+                            }
+                        }
+                    });
+
+            DataStream<String> statsJsonStream = statsStream
+                    .map(MessageLagStats::toJson);
+
+            if (statsTopic != null)
+                statsJsonStream.addSink(getProducer(statsTopic, statsProps));
+
+            if (printStats)
+                statsJsonStream.print();
+        }
 
         env.execute(String.format("Flink Lag Monitor [%s -> %s]", sourceTopic, targetTopic));
     }
@@ -197,16 +202,16 @@ public class FlinkLagMonitor {
                 String sourceSchemaFile = params.getRequired(SOURCE_PREFIX + AVRO_SCHEMA_FILE_OPTION);
                 sourceSchema = new String(Files.readAllBytes(Paths.get(sourceSchemaFile)));
             }
-            if (!sourceIsJson && sourceSchema == null)
-                throw new RuntimeException(String.format("Either --%s or --%s must be specified", SOURCE_PREFIX + JSON_OPTION, SOURCE_PREFIX + AVRO_SCHEMA_FILE_OPTION));
-            sourceKey = params.getRequired(SOURCE_PREFIX + PRIMARY_KEY_OPTION);
+//            if (!sourceIsJson && sourceSchema == null)
+//                throw new RuntimeException(String.format("Either --%s or --%s must be specified", SOURCE_PREFIX + JSON_OPTION, SOURCE_PREFIX + AVRO_SCHEMA_FILE_OPTION));
+            if (sourceIsJson || sourceSchema != null)
+                sourceKey = params.getRequired(SOURCE_PREFIX + PRIMARY_KEY_OPTION);
             sourceProps = Utils.getPrefixedProperties(params.getProperties(), SOURCE_PREFIX, true, NOT_KAFKA_OPTIONS);
 
             targetTopic = params.getRequired(TARGET_PREFIX + TOPIC_OPTION);
             targetIsJson = params.has(TARGET_PREFIX + JSON_OPTION);
             if (params.has(TARGET_PREFIX + CSV_OPTION))
                 targetCsvField = params.getInt(TARGET_PREFIX + CSV_OPTION);
-            targetIsOffset = params.has(TARGET_PREFIX + OFFSET_OPTION);
             targetSchema = null;
             if (params.has(TARGET_PREFIX + AVRO_SCHEMA_FILE_OPTION)) {
                 if (targetIsJson)
@@ -214,9 +219,10 @@ public class FlinkLagMonitor {
                 String targetSchemaFile = params.getRequired(TARGET_PREFIX + AVRO_SCHEMA_FILE_OPTION);
                 targetSchema = new String(Files.readAllBytes(Paths.get(targetSchemaFile)));
             }
-            if (!targetIsJson && targetSchema == null)
-                throw new RuntimeException(String.format("Either --%s or --%s must be specified", TARGET_PREFIX + JSON_OPTION, TARGET_PREFIX + AVRO_SCHEMA_FILE_OPTION));
-            targetKey = params.getRequired(TARGET_PREFIX + PRIMARY_KEY_OPTION);
+//            if (!targetIsJson && targetSchema == null)
+//                throw new RuntimeException(String.format("Either --%s or --%s must be specified", TARGET_PREFIX + JSON_OPTION, TARGET_PREFIX + AVRO_SCHEMA_FILE_OPTION));
+            if (targetIsJson || targetSchema != null)
+                targetKey = params.getRequired(TARGET_PREFIX + PRIMARY_KEY_OPTION);
             targetProps = Utils.getPrefixedProperties(params.getProperties(), TARGET_PREFIX, true, NOT_KAFKA_OPTIONS);
 
             lagTopic = params.get(LAG_PREFIX + TOPIC_OPTION);
@@ -232,6 +238,10 @@ public class FlinkLagMonitor {
             aggrWatermarkMs = params.getInt(AGGR_WATERMARK_MS_OPTION, DEFAULT_AGGR_WATERMARK_MS);
             aggrWindowMs = params.getInt(AGGR_WINDOW_MS_OPTION, DEFAULT_AGGR_WINDOW_MS);
             joinIntervalMs = params.getInt(JOIN_INTERVAL_MS_OPTION, DEFAULT_JOIN_INTERVAL_MS);
+
+            System.out.println("PARAMETERS:");
+            for(Map.Entry<String, String> e : params.toMap().entrySet())
+                System.out.printf("  --%s %s\n", e.getKey(), e.getValue());
         } catch (Exception e) {
             printUsage();
             throw e;

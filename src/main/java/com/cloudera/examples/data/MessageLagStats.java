@@ -26,6 +26,16 @@ public class MessageLagStats {
 
     public MessageLagStats() {}
 
+    public MessageLagStats(Long windowStart, Long windowEnd, Long minLagMs, Long maxLagMs, Long avgLagMs, Long sdevLagMs, Long count) {
+        this.windowStart = windowStart;
+        this.windowEnd = windowEnd;
+        this.minLagMs = minLagMs;
+        this.maxLagMs = maxLagMs;
+        this.avgLagMs = avgLagMs;
+        this.sdevLagMs = sdevLagMs;
+        this.count = count;
+    }
+
     @Override
     public String toString() {
         return "MessageLagStats{" +

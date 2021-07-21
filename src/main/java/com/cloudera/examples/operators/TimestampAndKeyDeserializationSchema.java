@@ -82,10 +82,14 @@ public class TimestampAndKeyDeserializationSchema implements KafkaDeserializatio
             String key = String.valueOf(consumerRecord.partition()) + "_" + String.valueOf(consumerRecord.offset());
             hash = key.hashCode();
         } else if (csvField != null) {
-            String record = new String(consumerRecord.value());
+            String record = new String(consumerRecord.value()).trim();
             String[] values = record.split(",");
-            if (values.length >= csvField + 1)
+            if (values.length >= csvField + 1) {
+                keyFound = true;
                 hash = values[csvField].hashCode();
+            } else {
+                key = String.valueOf(csvField);
+            }
         } else if (avroSchema == null) {
             Map json = mapper.readValue(consumerRecord.value(), Map.class);
             if (json.containsKey(key)) {
@@ -96,13 +100,13 @@ public class TimestampAndKeyDeserializationSchema implements KafkaDeserializatio
         } else {
             decoder = DecoderFactory.get().binaryDecoder(consumerRecord.value(), decoder);
             record = datumReader.read(record, decoder);
-            if (record.getSchema().getFields().contains(key)) {
+            if (record.getSchema().getField(key) != null) {
                 keyFound = true;
                 if (record.get(key) != null)
                     hash = record.get(key).hashCode();
             }
         }
-        if (!keyFound)
+        if (! useOffset && !keyFound)
             LOG.warn("Field \"{}\" not found in message", key);
         else if (hash == null)
             LOG.warn("Message has a null key");

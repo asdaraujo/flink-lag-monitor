@@ -1,0 +1,10 @@
+{
+  "type": "record",
+  "name": "msg",
+  "namespace": "me",
+  "fields": [
+    { "name": "id", "type": "int" },
+    { "name": "payload", "type": "string" },
+    { "name": "id_string", "type": ["null","string"], "default": null }
+  ]
+}
