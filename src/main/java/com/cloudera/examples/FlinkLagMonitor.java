@@ -17,10 +17,9 @@ package com.cloudera.examples;
 
 import com.cloudera.examples.data.MessageLag;
 import com.cloudera.examples.data.Message;
-import com.cloudera.examples.data.MessageLagStats;
 import com.cloudera.examples.operators.TimestampAndKeyDeserializationSchema;
 import com.cloudera.examples.utils.Utils;
-import org.apache.flink.api.common.eventtime.WatermarkStrategy;
+//import org.apache.flink.api.common.eventtime.WatermarkStrategy;
 import org.apache.flink.api.java.utils.ParameterTool;
 import org.apache.flink.streaming.api.datastream.DataStream;
 import org.apache.flink.streaming.api.datastream.KeyedStream;
@@ -31,10 +30,7 @@ import org.apache.flink.streaming.connectors.kafka.FlinkKafkaConsumer;
 import org.apache.flink.streaming.connectors.kafka.FlinkKafkaProducer;
 import org.apache.flink.streaming.connectors.kafka.KafkaDeserializationSchema;
 import org.apache.flink.streaming.connectors.kafka.KafkaSerializationSchema;
-import org.apache.flink.table.api.DataTypes;
-import org.apache.flink.table.api.Table;
-import org.apache.flink.table.api.Tumble;
-import org.apache.flink.table.api.bridge.java.StreamTableEnvironment;
+//import org.apache.flink.table.api.bridge.java.StreamTableEnvironment;
 import org.apache.flink.util.Collector;
 import org.apache.kafka.clients.producer.ProducerRecord;
 
@@ -42,12 +38,11 @@ import javax.annotation.Nullable;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Paths;
-import java.time.Duration;
 import java.util.Arrays;
 import java.util.List;
 import java.util.Properties;
 
-import static org.apache.flink.table.api.Expressions.*;
+//import static org.apache.flink.table.api.Expressions.*;
 
 public class FlinkLagMonitor {
     static final String SOURCE_PREFIX = "source.";
@@ -58,8 +53,12 @@ public class FlinkLagMonitor {
     static final String BOOTSTRAP_SERVERS_OPTION = "bootstrap.servers";
     static final String TOPIC_OPTION = "topic";
     static final String PARALLELISM_OPTION = "parallelism";
+
     static final String AVRO_SCHEMA_FILE_OPTION = "avro.schema.file";
     static final String JSON_OPTION = "use.json";
+    static final String CSV_OPTION = "use.csv";
+    static final String OFFSET_OPTION = "use.offset";
+
     static final String PRIMARY_KEY_OPTION = "primary.key";
     static final String JOIN_INTERVAL_MS_OPTION = "join.interval.ms";
     static final String AGGR_WATERMARK_MS_OPTION = "aggr.watermark.ms";
@@ -76,12 +75,16 @@ public class FlinkLagMonitor {
 
     static private String sourceTopic = null;
     static private boolean sourceIsJson = false;
+    static private Integer sourceCsvField = null;
+    static private boolean sourceIsOffset = false;
     static private String sourceSchema = null;
     static private String sourceKey = null;
     static private Properties sourceProps = null;
 
     static private String targetTopic = null;
     static private boolean targetIsJson = false;
+    static private Integer targetCsvField = null;
+    static private boolean targetIsOffset = false;
     static private String targetSchema = null;
     static private String targetKey = null;
     static private Properties targetProps = null;
@@ -110,14 +113,14 @@ public class FlinkLagMonitor {
 
         StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
         env.setParallelism(parallelism);
-        StreamTableEnvironment tableEnv = StreamTableEnvironment.create(env);
+//        StreamTableEnvironment tableEnv = StreamTableEnvironment.create(env);
 
-        KafkaDeserializationSchema<Message> sourceSerDe = new TimestampAndKeyDeserializationSchema(sourceKey, sourceIsJson ? null : sourceSchema);
+        KafkaDeserializationSchema<Message> sourceSerDe = new TimestampAndKeyDeserializationSchema(sourceKey, sourceIsJson ? null : sourceSchema, sourceCsvField, sourceIsOffset);
         System.out.println(sourceProps);
         FlinkKafkaConsumer<Message> sourceConsumer = new FlinkKafkaConsumer<>(sourceTopic, sourceSerDe, sourceProps);
         KeyedStream<Message, Integer> source = env.addSource(sourceConsumer).keyBy(t -> t.hash);
 
-        KafkaDeserializationSchema<Message> targetSerDe = new TimestampAndKeyDeserializationSchema(targetKey, targetIsJson ? null : targetSchema);
+        KafkaDeserializationSchema<Message> targetSerDe = new TimestampAndKeyDeserializationSchema(targetKey, targetIsJson ? null : targetSchema, targetCsvField, targetIsOffset);
         FlinkKafkaConsumer<Message> targetConsumer = new FlinkKafkaConsumer<>(targetTopic, targetSerDe, targetProps);
         KeyedStream<Message, Integer> target = env.addSource(targetConsumer).keyBy(t -> t.hash);
 
@@ -129,10 +132,10 @@ public class FlinkLagMonitor {
                     public void processElement(Message left, Message right, Context context, Collector<MessageLag> out) throws Exception {
                         out.collect(new MessageLag(left.hash, left.timestamp, right.timestamp));
                     }
-                })
-                .assignTimestampsAndWatermarks(WatermarkStrategy
-                        .<MessageLag>forBoundedOutOfOrderness(Duration.ofMillis(aggrWatermarkMs))
-                        .withTimestampAssigner((event, timestamp) -> event.timestamp0));
+                });
+//                .assignTimestampsAndWatermarks(WatermarkStrategy
+//                        .<MessageLag>forBoundedOutOfOrderness(Duration.ofMillis(aggrWatermarkMs))
+//                        .withTimestampAssigner((event, timestamp) -> event.timestamp0));
 
         if (lagTopic != null || printLag) {
             DataStream<String> jsonStream = lagStream.map(MessageLag::toJson);
@@ -144,38 +147,38 @@ public class FlinkLagMonitor {
                 jsonStream.print();
         }
 
-        if (statsTopic != null || printStats) {
-            Table results = tableEnv
-                    .fromDataStream(lagStream,
-                            $("timestamp0").rowtime().as("rowtime"),
-                            $("timestamp0"),
-                            $("timestamp1"))
-                    .addColumns($("timestamp1").minus($("timestamp0")).as("lagMs"))
-                    .window(Tumble
-                            .over(lit(aggrWindowMs).milli())
-                            .on($("rowtime"))
-                            .as("w"))
-                    .groupBy($("w"))
-                    .select(
-                            $("w").start().cast(DataTypes.BIGINT()).as("windowStart"),
-                            $("w").end().cast(DataTypes.BIGINT()).as("windowEnd"),
-                            $("lagMs").min().as("minLagMs"),
-                            $("lagMs").max().as("maxLagMs"),
-                            $("lagMs").avg().as("avgLagMs"),
-                            $("lagMs").stddevPop().as("sdevLagMs"),
-                            $("lagMs").count().as("count")
-                    );
-
-            DataStream<String> statsJsonStream = tableEnv
-                    .toAppendStream(results, MessageLagStats.class)
-                    .map(MessageLagStats::toJson);
-
-            if (statsTopic != null)
-                statsJsonStream.addSink(getProducer(statsTopic, statsProps));
-
-            if (printStats)
-                statsJsonStream.print();
-        }
+//        if (statsTopic != null || printStats) {
+//            Table results = tableEnv
+//                    .fromDataStream(lagStream,
+//                            $("timestamp0").rowtime().as("rowtime"),
+//                            $("timestamp0"),
+//                            $("timestamp1"))
+//                    .addColumns($("timestamp1").minus($("timestamp0")).as("lagMs"))
+//                    .window(Tumble
+//                            .over(lit(aggrWindowMs).milli())
+//                            .on($("rowtime"))
+//                            .as("w"))
+//                    .groupBy($("w"))
+//                    .select(
+//                            $("w").start().cast(DataTypes.BIGINT()).as("windowStart"),
+//                            $("w").end().cast(DataTypes.BIGINT()).as("windowEnd"),
+//                            $("lagMs").min().as("minLagMs"),
+//                            $("lagMs").max().as("maxLagMs"),
+//                            $("lagMs").avg().as("avgLagMs"),
+//                            $("lagMs").stddevPop().as("sdevLagMs"),
+//                            $("lagMs").count().as("count")
+//                    );
+//
+//            DataStream<String> statsJsonStream = tableEnv
+//                    .toAppendStream(results, MessageLagStats.class)
+//                    .map(MessageLagStats::toJson);
+//
+//            if (statsTopic != null)
+//                statsJsonStream.addSink(getProducer(statsTopic, statsProps));
+//
+//            if (printStats)
+//                statsJsonStream.print();
+//        }
 
         env.execute(String.format("Flink Lag Monitor [%s -> %s]", sourceTopic, targetTopic));
     }
@@ -184,6 +187,9 @@ public class FlinkLagMonitor {
         try {
             sourceTopic = params.getRequired(SOURCE_PREFIX + TOPIC_OPTION);
             sourceIsJson = params.has(SOURCE_PREFIX + JSON_OPTION);
+            if (params.has(SOURCE_PREFIX + CSV_OPTION))
+                sourceCsvField = params.getInt(SOURCE_PREFIX + CSV_OPTION);
+            sourceIsOffset = params.has(SOURCE_PREFIX + OFFSET_OPTION);
             sourceSchema = null;
             if (params.has(SOURCE_PREFIX + AVRO_SCHEMA_FILE_OPTION)) {
                 if (sourceIsJson)
@@ -198,6 +204,9 @@ public class FlinkLagMonitor {
 
             targetTopic = params.getRequired(TARGET_PREFIX + TOPIC_OPTION);
             targetIsJson = params.has(TARGET_PREFIX + JSON_OPTION);
+            if (params.has(TARGET_PREFIX + CSV_OPTION))
+                targetCsvField = params.getInt(TARGET_PREFIX + CSV_OPTION);
+            targetIsOffset = params.has(TARGET_PREFIX + OFFSET_OPTION);
             targetSchema = null;
             if (params.has(TARGET_PREFIX + AVRO_SCHEMA_FILE_OPTION)) {
                 if (targetIsJson)
